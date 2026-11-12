@@ -1,0 +1,47 @@
+[package]
+name = "screener"
+version = "0.2.1"
+edition = "2021"
+description = "LAN remote desktop for Windows with hardware video acceleration"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/im-tesla/Screener"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+libloading = "0.8"
+socket2 = "0.6"
+zstd = "0.13"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.62", features = [
+    "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Threading",
+    "Win32_System_SystemInformation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi",
+    "Win32_Media_Multimedia", "Win32_Security", "Win32_Storage_FileSystem",
+    "Win32_System_StationsAndDesktops", "Win32_System_JobObjects", "Win32_UI_Shell",
+    "Win32_System_Com", "Win32_Networking_WinSock"
+] }
+
+[build-dependencies]
+zstd = "0.13"
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "viewer"
+path = "src/bin/viewer.rs"

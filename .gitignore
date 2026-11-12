@@ -1,0 +1,7 @@
+/target/
+/dist/
+/vendor/
+/.bench/
+*.log
+*.png
+*.jsonl
