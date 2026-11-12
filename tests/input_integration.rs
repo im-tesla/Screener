@@ -106,6 +106,8 @@ fn tcp_input_injection_and_disconnect_release() {
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         stream.write_all(MAGIC).unwrap();
+        // Capability byte: this test does not request desktop audio.
+        stream.write_all(&[0]).unwrap();
         let mut hello = [0; 36];
         stream.read_exact(&mut hello).unwrap();
         assert_eq!(&hello[..8], MAGIC);

@@ -1,8 +1,19 @@
 use anyhow::{bail, ensure, Result};
 use std::io::{Read, Write};
 
-pub const MAGIC: &[u8; 8] = b"SCRNR003";
+pub const MAGIC: &[u8; 8] = b"SCRNR004";
 pub const MAX_PACKET: usize = 2 * 1024 * 1024;
+
+/// Client hello capability byte: the viewer accepts desktop audio.
+pub const CAPABILITY_AUDIO: u8 = 1 << 0;
+
+/// Server status stream packet types: cursor, shape, info, stats, audio format, audio.
+pub const STATUS_CURSOR: u8 = 0xC0;
+pub const STATUS_CURSOR_SHAPE: u8 = 0xC1;
+pub const STATUS_INFO: u8 = 0xC2;
+pub const STATUS_STATS: u8 = 0xC3;
+pub const STATUS_AUDIO_FORMAT: u8 = 0xC4;
+pub const STATUS_AUDIO_DATA: u8 = 0xC5;
 
 pub fn write_packet(writer: &mut impl Write, data: &[u8]) -> Result<()> {
     ensure!(data.len() <= MAX_PACKET, "packet exceeds limit");

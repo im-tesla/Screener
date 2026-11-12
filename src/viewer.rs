@@ -505,6 +505,7 @@ fn network(
     shared: Arc<Shared>,
     rx: Receiver<InputEvent>,
     events: Sender<NetworkEvent>,
+    audio: Option<Arc<crate::audio::AudioPlayer>>,
 ) {
     while shared.alive.load(Ordering::Relaxed) {
         let result = (|| -> Result<()> {
@@ -528,6 +529,12 @@ fn network(
             stream.set_read_timeout(Some(Duration::from_secs(3)))?;
             stream.set_write_timeout(Some(Duration::from_millis(500)))?;
             stream.write_all(MAGIC)?;
+            let capability = if audio.is_some() {
+                crate::protocol::CAPABILITY_AUDIO
+            } else {
+                0
+            };
+            stream.write_all(&[capability])?;
             let mut hello = [0u8; 36];
             stream.read_exact(&mut hello)?;
             ensure!(&hello[..8] == MAGIC, "server protocol mismatch");
@@ -537,10 +544,27 @@ fn network(
             let source_w = i32::from_le_bytes(hello[16..20].try_into()?);
             let source_h = i32::from_le_bytes(hello[20..24].try_into()?);
             let port = u16::from_le_bytes(hello[30..32].try_into()?);
-            let container = if u16::from_le_bytes(hello[34..36].try_into()?) == 1 {
-                "nut"
+            // Video is MPEG-TS over UDP. The legacy libmpv comparison keeps
+            // reading the server's original NUT stream over TCP.
+            let (url, container) = if c.legacy_buffering {
+                let container = if u16::from_le_bytes(hello[34..36].try_into()?) == 1 {
+                    "nut"
+                } else {
+                    "mpegts"
+                };
+                (
+                    format!(
+                        "tcp://{}:{}?tcp_nodelay=1&timeout=3000000",
+                        address.ip(),
+                        port
+                    ),
+                    container,
+                )
             } else {
-                "mpegts"
+                (
+                    format!("udp://{}", SocketAddr::new(address.ip(), port)),
+                    "mpegts",
+                )
             };
             ensure!(
                 width > 0 && height > 0 && fps > 0,
@@ -550,11 +574,6 @@ fn network(
             while rx.try_recv().is_ok() {}
             stream.write_all(&InputEvent::ReleaseAll.encode())?;
             shared.connected.store(true, Ordering::Relaxed);
-            let url = format!(
-                "tcp://{}:{}?tcp_nodelay=1&timeout=3000000",
-                address.ip(),
-                port
-            );
             let _ = events.send(NetworkEvent::Connected {
                 url,
                 width: width as i32,
@@ -569,6 +588,7 @@ fn network(
             let reader_alive = connected.clone();
             let reader_shared = shared.clone();
             let cursor_events = events.clone();
+            let reader_audio = audio.clone();
             let server_ip = address.ip();
             let reader = std::thread::spawn(move || {
                 let mut buf = [0; 2];
@@ -603,6 +623,28 @@ fn network(
                             }
                         } else if let Ok(stats) = serde_json::from_slice::<ServerStats>(&packet) {
                             let _ = cursor_events.send(NetworkEvent::Stats(stats));
+                        }
+                    } else if buf[0] == crate::protocol::STATUS_AUDIO_FORMAT {
+                        let mut packet = vec![];
+                        if read_packet(&mut incoming, &mut packet).is_err() {
+                            break;
+                        }
+                        if let Ok(format) = crate::audio::Format::decode(&packet) {
+                            log(format!(
+                                "Audio stream: {} Hz, {} ch from server",
+                                format.rate, format.channels
+                            ));
+                            if let Some(audio) = &reader_audio {
+                                audio.format(format);
+                            }
+                        }
+                    } else if buf[0] == crate::protocol::STATUS_AUDIO_DATA {
+                        let mut packet = vec![];
+                        if read_packet(&mut incoming, &mut packet).is_err() {
+                            break;
+                        }
+                        if let Some(audio) = &reader_audio {
+                            audio.samples(&packet);
                         }
                     } else {
                         break;
@@ -789,8 +831,17 @@ pub fn run(c: ViewerConfig) -> Result<()> {
         s.video.set(child);
         DragAcceptFiles(hwnd, true);
         DragAcceptFiles(child, true);
-        let player = Rc::new(Player::new(child.0 as isize, c.legacy_buffering)?);
+        let player = Rc::new(Player::new(
+            child.0 as isize,
+            c.legacy_buffering,
+            c.video_drop_every,
+        )?);
         *s.playback.borrow_mut() = Some(player.clone());
+        let audio = if c.no_audio {
+            None
+        } else {
+            Some(Arc::new(crate::audio::AudioPlayer::new(c.audio_buffer_ms)))
+        };
         ensure!(
             SetTimer(Some(hwnd), VIDEO_TIMER, 8, None) != 0,
             "video timer failed"
@@ -814,6 +865,7 @@ pub fn run(c: ViewerConfig) -> Result<()> {
         };
         let network_shared = shared.clone();
         let network_cfg = c.clone();
+        let network_audio = audio.clone();
         let transfer_shared = shared.clone();
         let transfer_events = event_tx.clone();
         let transfer_worker = std::thread::spawn(move || {
@@ -850,7 +902,9 @@ pub fn run(c: ViewerConfig) -> Result<()> {
                 let _ = transfer_events.send(NetworkEvent::Transfer(message));
             }
         });
-        let worker = std::thread::spawn(move || network(network_cfg, network_shared, rx, event_tx));
+        let worker = std::thread::spawn(move || {
+            network(network_cfg, network_shared, rx, event_tx, network_audio)
+        });
         if c.fullscreen {
             s.fullscreen();
         }
@@ -871,6 +925,7 @@ pub fn run(c: ViewerConfig) -> Result<()> {
         let mut last_cursor = 254u8;
         let mut previous_viewer = ViewerStats::default();
         let mut previous_server = ServerStats::default();
+        let mut previous_audio_received = 0u64;
         let mut modal_attempted = false;
         let mut modal_verified = !c.modal_probe;
         while !quit && shared.alive.load(Ordering::Relaxed) {
@@ -1029,7 +1084,34 @@ pub fn run(c: ViewerConfig) -> Result<()> {
                         );
                         previous_server = server.clone();
                     }
-                    log(format!("PERF decoded_fps={decoded:.1} displayed_fps={shown:.1} skipped={skips} render_ms={render_ms:.2}{extra}"));
+                    let udp = if stats.udp_received > 0 {
+                        format!(
+                            " udp_datagrams={} udp_recovered={} udp_missing={} udp_late={}",
+                            stats.udp_received + stats.udp_recovered,
+                            stats.udp_recovered,
+                            stats.udp_missing,
+                            stats.udp_late
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let audio_text = match &audio {
+                        Some(player) => {
+                            let snapshot = player.snapshot();
+                            let kbps = snapshot.received.saturating_sub(previous_audio_received)
+                                as f64
+                                * 8.0
+                                / dt
+                                / 1000.0;
+                            previous_audio_received = snapshot.received;
+                            format!(
+                                " audio_kbps={kbps:.0} audio_peak={:.2} audio_underruns={} audio_dropped={}",
+                                snapshot.peak, snapshot.underruns, snapshot.dropped
+                            )
+                        }
+                        None => String::new(),
+                    };
+                    log(format!("PERF decoded_fps={decoded:.1} displayed_fps={shown:.1} skipped={skips} render_ms={render_ms:.2}{extra}{udp}{audio_text}"));
                     let status = transfer_status
                         .as_ref()
                         .filter(|(_, t)| t.elapsed() < Duration::from_secs(8))
@@ -1101,13 +1183,23 @@ pub fn run(c: ViewerConfig) -> Result<()> {
                     if let Some(after) = player.stats() {
                         let decoded = after.decoded.saturating_sub(before.decoded);
                         let shown = after.presented.saturating_sub(before.presented);
-                        modal_verified = decoded >= 30 && shown * 100 >= decoded * 85;
+                        // Datagram delivery is burstier than the old TCP path, so a
+                        // few frames can be replaced before the nested-loop timer runs.
+                        // Require steady presentation, not every frame, so a frozen
+                        // video still fails while normal jitter passes.
+                        modal_verified = decoded >= 30 && shown * 100 >= decoded * 75;
                         log(format!("MODAL PROBE: decoded={decoded} presented={shown} passed={modal_verified}"));
                     }
                 }
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+        log(format!(
+            "Viewer loop ended: quit={quit}, alive={}, smoke_seconds={:?}, elapsed={}s",
+            shared.alive.load(Ordering::Relaxed),
+            c.smoke_seconds,
+            start.elapsed().as_secs()
+        ));
         s.release();
         if !ages.is_empty() {
             ages.sort_unstable();

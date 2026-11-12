@@ -33,6 +33,9 @@ struct Desktop {
 }
 impl Desktop {
     fn new(output: u32) -> Result<Self> {
+        // Duplication captures the calling thread's desktop. Follow the input
+        // desktop so the secure desktop (UAC, lock screen) is duplicated too.
+        crate::desktop::follow_input_desktop().context("selecting the input desktop")?;
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
             let adapter = factory.EnumAdapters1(0)?;
@@ -51,12 +54,24 @@ impl Desktop {
             )?;
             let device = device.context("capture device")?;
             let context = context.context("capture context")?;
-            let dup = if let Ok(output5) = output.cast::<IDXGIOutput5>() {
-                output5
-                    .DuplicateOutput1(&device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM])
-                    .or_else(|_| output.DuplicateOutput(&device))?
-            } else {
-                output.DuplicateOutput(&device)?
+            let dup = match output.cast::<IDXGIOutput5>() {
+                Ok(output5) => {
+                    match output5.DuplicateOutput1(&device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]) {
+                        Ok(dup) => dup,
+                        Err(e) => {
+                            log(format!(
+                            "BGRA8 duplication unavailable ({e}); retrying with the desktop format"
+                        ));
+                            output.DuplicateOutput(&device)?
+                        }
+                    }
+                }
+                Err(e) => {
+                    log(format!(
+                        "IDXGIOutput5 unavailable ({e}); using the desktop format"
+                    ));
+                    output.DuplicateOutput(&device)?
+                }
             };
             let desc = dup.GetDesc();
             log(format!(
@@ -176,17 +191,51 @@ impl Feed {
                 );
             }
             let result = (|| -> Result<()> {
-                let mut desktop = Desktop::new(output)?;
-                log(format!(
-                    "Native capture {}x{} @ {fps} FPS; one pending frame",
-                    desktop.width, desktop.height
-                ));
-                let mut pixels = Arc::new(vec![0; desktop.width * desktop.height * 4]);
                 let period = Duration::from_secs_f64(1.0 / fps as f64);
                 let mut next = Instant::now();
+                let mut desktop: Option<Desktop> = None;
+                let mut pixels = Arc::new(Vec::new());
+                let mut last_pause = Instant::now() - Duration::from_secs(10);
                 while running.load(Ordering::Relaxed) {
-                    desktop.update(&mut pixels)?;
-                    if desktop.valid {
+                    if desktop.is_none() {
+                        match Desktop::new(output) {
+                            Ok(created) => {
+                                log(format!(
+                                    "Native capture {}x{} @ {fps} FPS on the {} desktop; one pending frame",
+                                    created.width,
+                                    created.height,
+                                    crate::desktop::current()
+                                ));
+                                pixels = Arc::new(vec![0; created.width * created.height * 4]);
+                                desktop = Some(created);
+                            }
+                            Err(e) => {
+                                // Typically the secure desktop is active and this
+                                // process is not LocalSystem; wait for it to close.
+                                if last_pause.elapsed() > Duration::from_secs(2) {
+                                    log(format!("Capture paused: {e:#}"));
+                                    last_pause = Instant::now();
+                                }
+                                std::thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
+                        }
+                    }
+                    let current = desktop.as_mut().unwrap();
+                    match current.update(&mut pixels) {
+                        Ok(()) => {}
+                        Err(e) if desktop_switched(&e) => {
+                            // Recreate the duplication on the new desktop.
+                            log(format!(
+                                "Capture: desktop switched ({e}); recreating duplication"
+                            ));
+                            desktop = None;
+                            std::thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                    if current.valid {
                         captured.captured.fetch_add(1, Ordering::Relaxed);
                         if tx.is_full() {
                             let _ = replace.try_recv();
@@ -233,6 +282,22 @@ impl Feed {
             let _ = t.join();
         }
     }
+}
+
+/// Desktop Duplication loses access when Windows switches to another desktop
+/// (UAC, lock screen, Ctrl+Alt+Delete). The duplication must be recreated on the
+/// newly active desktop.
+fn desktop_switched(error: &anyhow::Error) -> bool {
+    use windows::Win32::Graphics::Dxgi::{
+        DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED,
+    };
+    error
+        .downcast_ref::<windows::core::Error>()
+        .is_some_and(|e| {
+            e.code() == DXGI_ERROR_ACCESS_LOST
+                || e.code() == DXGI_ERROR_SESSION_DISCONNECTED
+                || e.code() == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+        })
 }
 
 // A missed tick is discarded. Never repay timing debt by feeding the encoder

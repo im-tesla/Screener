@@ -68,4 +68,8 @@ pub struct ViewerStats {
     pub skipped: u64,
     pub render_us: u64,
     pub elapsed_ms: u64,
+    pub udp_received: u64,
+    pub udp_recovered: u64,
+    pub udp_missing: u64,
+    pub udp_late: u64,
 }

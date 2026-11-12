@@ -7,9 +7,16 @@ use std::{
 
 static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
 static RUNTIME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+static RUNTIME_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 pub fn bundled_runtime() -> Option<&'static std::path::Path> {
     RUNTIME.get().map(|p| p.as_path())
+}
+
+/// The service worker unpacks beside its protected Program Files executable
+/// instead of into a user-writable profile cache.
+pub fn set_runtime_root(path: std::path::PathBuf) {
+    let _ = RUNTIME_ROOT.set(path);
 }
 
 /// Unpack only on first use/version change. A content-addressed cache lets the
@@ -22,11 +29,16 @@ pub fn prepare_runtime(name: &str, packed: &[u8], hash: &str, size: &str) -> any
         io::{BufReader, Read},
         path::PathBuf,
     };
-    let root = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Screener")
-        .join("runtime")
+    let root = RUNTIME_ROOT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("Screener")
+                .join("runtime")
+        })
         .join(&hash[..16]);
     fs::create_dir_all(&root)?;
     let path = root.join(name);

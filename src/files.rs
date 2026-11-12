@@ -30,6 +30,7 @@ use windows::{
 const FILE_MAGIC: &[u8; 8] = b"SCRFILE1";
 const CHUNK: usize = 64 * 1024;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static DESKTOP_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 #[derive(Serialize, Deserialize)]
 struct Header {
     name: String,
@@ -41,7 +42,16 @@ struct Reply {
     message: String,
 }
 
+/// A LocalSystem worker must drop files onto the signed-in user's Desktop rather
+/// than the service profile, so the service resolves and passes that path.
+pub fn set_desktop(path: PathBuf) {
+    let _ = DESKTOP_OVERRIDE.set(path);
+}
+
 pub fn desktop() -> Result<PathBuf> {
+    if let Some(path) = DESKTOP_OVERRIDE.get() {
+        return Ok(path.clone());
+    }
     unsafe {
         let p = SHGetKnownFolderPath(&FOLDERID_Desktop, KNOWN_FOLDER_FLAG(0), None)?;
         let path = PathBuf::from(p.to_string()?);

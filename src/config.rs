@@ -80,8 +80,35 @@ pub struct ServerConfig {
     /// Capture and encode a five-second local hardware benchmark, then exit.
     #[arg(long)]
     pub probe: bool,
+    /// Do not capture desktop audio.
+    #[arg(long)]
+    pub no_audio: bool,
+    /// Do not add Windows Firewall rules when installing the service.
+    #[arg(long)]
+    pub no_firewall: bool,
     #[arg(long)]
     pub smoke_seconds: Option<u64>,
+    /// Internal: run the interactive session worker directly.
+    #[arg(long, hide = true)]
+    pub worker: bool,
+    /// Internal: service control manager entry point.
+    #[arg(long, hide = true)]
+    pub service: bool,
+    /// Internal: install or update the background service, then exit.
+    #[arg(long, hide = true)]
+    pub install_service: bool,
+    /// Internal: stop and remove the background service, then exit.
+    #[arg(long, hide = true)]
+    pub uninstall_service: bool,
+    /// Internal: report background service state and exit.
+    #[arg(long, hide = true)]
+    pub service_status: bool,
+    /// Internal: Windows session hosting the worker.
+    #[arg(long, hide = true)]
+    pub session: Option<u32>,
+    /// Internal: signed-in user's Desktop for received files.
+    #[arg(long, hide = true)]
+    pub desktop: Option<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -110,9 +137,18 @@ pub struct ViewerConfig {
     /// Loopback diagnostic: show a timestamp barcode and measure decoded frame age.
     #[arg(long, requires = "view_only")]
     pub latency_probe: bool,
+    /// Do not play desktop audio.
+    #[arg(long)]
+    pub no_audio: bool,
+    /// Audio playout buffer in milliseconds; trades latency for loss tolerance.
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(10..=500))]
+    pub audio_buffer_ms: u16,
     /// Diagnostic: check rendering while a nested Windows message loop runs.
     #[arg(long, hide = true, requires = "view_only")]
     pub modal_probe: bool,
+    /// Diagnostic: discard every Nth video datagram before loss recovery.
+    #[arg(long, hide = true, requires = "view_only")]
+    pub video_drop_every: Option<u32>,
     /// Diagnostic comparison with the original player buffering settings.
     #[arg(long, hide = true)]
     pub legacy_buffering: bool,

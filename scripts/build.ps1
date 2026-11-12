@@ -5,8 +5,13 @@ try {
     if (!(Test-Path vendor\ffmpeg.exe) -or !(Test-Path vendor\libmpv-2.dll)) {
         & (Join-Path $PSScriptRoot 'fetch-runtime.ps1')
     }
+    # Cargo writes progress to stderr; keep that from tripping the Stop preference.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     cargo build --release --locked
-    if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+    if ($code -ne 0) { throw 'Rust build failed' }
     New-Item -ItemType Directory -Force dist | Out-Null
     Copy-Item -LiteralPath target\release\server.exe,target\release\viewer.exe -Destination dist
     Copy-Item -LiteralPath README.md,LICENSE,THIRD_PARTY.md,VALIDATION.md -Destination dist

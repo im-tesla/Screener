@@ -1,7 +1,10 @@
 use crate::protocol::InputEvent;
-use anyhow::{ensure, Result};
+use anyhow::{bail, Result};
 use std::collections::HashSet;
-use windows::Win32::UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*};
+use windows::Win32::{
+    System::Threading::GetCurrentThreadId,
+    UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+};
 
 /// Identifies our injected input, allowing local diagnostics without a feedback loop.
 pub const INJECTION_TAG: usize = 0x5343524E;
@@ -16,6 +19,9 @@ pub struct DesktopRect {
 
 pub struct Injector {
     pub rect: DesktopRect,
+    /// The current thread is permanently attached to one desktop by
+    /// `desktop::attach`; it must not follow the input desktop afterwards.
+    pinned: bool,
     keys: HashSet<(u16, u16, u8)>,
     buttons: HashSet<u8>,
 }
@@ -23,9 +29,15 @@ impl Injector {
     pub fn new(rect: DesktopRect) -> Self {
         Self {
             rect,
+            pinned: false,
             keys: HashSet::new(),
             buttons: HashSet::new(),
         }
+    }
+    pub fn new_pinned(rect: DesktopRect) -> Self {
+        let mut injector = Self::new(rect);
+        injector.pinned = true;
+        injector
     }
     pub fn apply(&mut self, event: InputEvent) -> Result<()> {
         let input = match event {
@@ -112,11 +124,35 @@ impl Injector {
             }
             InputEvent::Heartbeat => return Ok(()),
         };
-        let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-        ensure!(
-            sent == 1,
-            "SendInput rejected event (target may be elevated or on a secure desktop)"
-        );
+        // A pinned injector thread is already attached to its desktop. The
+        // non-pinned path follows the active desktop before injecting.
+        let followed = if self.pinned {
+            None
+        } else {
+            Some(crate::desktop::follow_input_desktop())
+        };
+        let mut sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        let mut second = None;
+        if sent != 1 && !self.pinned {
+            // The desktop may have switched between the check and the injection.
+            second = Some(crate::desktop::follow_input_desktop());
+            sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        }
+        if sent != 1 {
+            let mut detail = String::new();
+            if let Some(Err(e)) = followed {
+                detail.push_str(&format!("; input desktop: {e:#}"));
+            }
+            if let Some(Err(e)) = second {
+                detail.push_str(&format!("; second input desktop: {e:#}"));
+            }
+            bail!(
+                "SendInput rejected an event on desktop '{}' (thread {}): {}{detail}",
+                crate::desktop::current(),
+                unsafe { GetCurrentThreadId() },
+                std::io::Error::last_os_error()
+            );
+        }
         Ok(())
     }
     pub fn release_all(&mut self) {

@@ -1,6 +1,8 @@
+pub mod audio;
 pub mod capture;
 pub mod config;
 pub mod cursor;
+pub mod desktop;
 pub mod discovery;
 pub mod files;
 pub mod input;
@@ -10,6 +12,8 @@ pub mod player;
 pub mod protocol;
 pub mod render;
 pub mod server;
+pub mod service;
 pub mod telemetry;
+pub mod udp;
 pub mod util;
 pub mod viewer;

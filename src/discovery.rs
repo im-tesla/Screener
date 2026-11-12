@@ -12,8 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const QUERY: &[u8] = b"SCREENER_DISCOVER_3";
-const RESPONSE: &[u8] = b"SCREENER_HERE_3";
+const QUERY: &[u8] = b"SCREENER_DISCOVER_4";
+const RESPONSE: &[u8] = b"SCREENER_HERE_4";
 
 pub fn serve(bind: &str, video: u16, input: u16, alive: Arc<AtomicBool>) -> Result<()> {
     let sock = UdpSocket::bind((bind, DISCOVERY_PORT))?;
